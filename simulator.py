@@ -60,7 +60,7 @@ def update_true_fire(
     Update TRUE wildfire intensity (hidden ground truth).
 
     fire_origins: list of (x,y) starting points, or None for 'no wildfire'
-    spread_speed: how fast the front grows
+    spread_speed: how fast the front grows (already adjusted by environment)
     wind_vec:     (wx, wy) drift per time step of the fire front
     """
     if not fire_origins:
@@ -276,11 +276,14 @@ def simulate(
     wind_speed: float = 0.0,
     wind_direction_deg: float = 0.0,
     seed: Optional[int] = None,
-    # --- policy parameters (Option 3) ---
+    # --- policy parameters (AI decision) ---
     alpha_load: float = 1.0,
     beta_fire: float = 2.0,
     max_fire_risk: float = 0.8,
     high_risk_trip: float = 0.95,
+    # --- wildfire triangle knobs (Phase 2) ---
+    dryness_index: float = 0.7,   # Fuels (0 = wet, 1 = very dry)
+    slope_factor: float = 0.5,    # Topography (0 = flat, 1 = steep, hard terrain)
 ):
     """
     Run one simulation and return structured logs for Streamlit + learning.
@@ -293,6 +296,13 @@ def simulate(
       - beta_fire:  weight on fire_risk in node_score
       - max_fire_risk: hard cutoff to ever energize a node
       - high_risk_trip: TRUE fire level at which energized nodes auto-trip
+
+    Wildfire triangle:
+      - dryness_index: fuels leg (how ready the vegetation is to burn)
+      - wind_speed / wind_direction_deg: weather leg (direction & push)
+      - slope_factor: topography leg (slope & terrain complexity)
+
+    These factors are combined into an effective spread speed.
     """
     if seed is not None:
         random.seed(seed)
@@ -300,7 +310,7 @@ def simulate(
     G = build_grid()
     state = initial_state(G)
 
-    # ensure 3-layer keys exist
+    # ensure keys exist
     for n in G.nodes:
         state[n]["true_fire"] = state[n].get("true_fire", 0.0)
         state[n]["fire_risk"] = state[n].get("fire_risk", 0.0)
@@ -319,9 +329,21 @@ def simulate(
         fire_origins = []
         use_wildfire = False
 
-    # wind vector from polar inputs
+    # wind vector from polar inputs  (weather leg)
     theta = math.radians(wind_direction_deg)
     wind_vec = (wind_speed * math.cos(theta), wind_speed * math.sin(theta))
+
+    # ----- Phase 2: combine wildfire triangle into spread speed -----
+    # Base spread speed from the UI is modified by:
+    #  - dryness_index  (fuels)
+    #  - slope_factor   (topography)
+    #
+    # Both are in [0,1]. We map them into multipliers in [0.5, 1.5] so the
+    # physics changes but doesn't explode.
+    dryness_multiplier = 0.5 + dryness_index       # 0.5 .. 1.5
+    slope_multiplier = 0.5 + slope_factor          # 0.5 .. 1.5
+
+    effective_spread_speed = spread_speed_true * dryness_multiplier * slope_multiplier
 
     decision_log = []
 
@@ -336,7 +358,7 @@ def simulate(
             state,
             t,
             fire_origins=fire_origins,
-            spread_speed_true=spread_speed_true,
+            spread_speed_true=effective_spread_speed,
             wind_vec=wind_vec,
             use_wildfire=use_wildfire,
             alpha_load=alpha_load,
@@ -414,6 +436,9 @@ def simulate(
             "beta_fire": beta_fire,
             "max_fire_risk": max_fire_risk,
             "high_risk_trip": high_risk_trip,
+            "dryness_index": dryness_index,
+            "slope_factor": slope_factor,
+            "effective_spread_speed": effective_spread_speed,
         },
     }
 
@@ -438,6 +463,8 @@ def run_cli_demo():
             wind_speed=0.0,
             wind_direction_deg=0.0,
             seed=42,
+            dryness_index=0.7,
+            slope_factor=0.5,
         )
 
         for row in result["decision_log"]:
